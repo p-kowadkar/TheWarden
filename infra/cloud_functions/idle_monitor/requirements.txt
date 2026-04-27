@@ -1,0 +1,4 @@
+functions-framework==3.8.1
+google-cloud-compute==1.19.2
+google-cloud-monitoring==2.22.0
+google-api-python-client==2.139.0

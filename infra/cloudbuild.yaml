@@ -1,0 +1,51 @@
+steps:
+  # ── Step 1: Build the Docker image ─────────────────────────────────────────
+  - name: "gcr.io/cloud-builders/docker"
+    id: build
+    args:
+      - build
+      - --tag
+      - "gcr.io/$PROJECT_ID/warden-backend:$COMMIT_SHA"
+      - --tag
+      - "gcr.io/$PROJECT_ID/warden-backend:latest"
+      - --file
+      - warden_backend/Dockerfile
+      - warden_backend/
+
+  # ── Step 2: Push image to Container Registry ────────────────────────────────
+  - name: "gcr.io/cloud-builders/docker"
+    id: push
+    args:
+      - push
+      - --all-tags
+      - "gcr.io/$PROJECT_ID/warden-backend"
+    waitFor:
+      - build
+
+  # ── Step 3: Deploy to Cloud Run ─────────────────────────────────────────────
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: deploy
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - warden-backend
+      - --image
+      - "gcr.io/$PROJECT_ID/warden-backend:$COMMIT_SHA"
+      - --region
+      - us-central1
+      - --platform
+      - managed
+      - --quiet
+    waitFor:
+      - push
+
+images:
+  - "gcr.io/$PROJECT_ID/warden-backend:$COMMIT_SHA"
+  - "gcr.io/$PROJECT_ID/warden-backend:latest"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_MEDIUM
+
+timeout: 900s
