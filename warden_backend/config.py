@@ -9,8 +9,12 @@ class Settings(BaseSettings):
     gcp_location: str = "us-central1"
 
     # AI Models
-    model_standard: str = "gemini-2.5-flash-preview-05-20"
-    model_critical: str = "gemini-2.5-pro-preview-05-06"
+    model_standard: str = "gemini-3-flash-preview"
+    model_critical: str = "gemini-3.1-pro-preview"
+
+    # Fallback models (used on 503/429 after retries are exhausted)
+    model_standard_fallback: str = "gemini-2.5-flash"
+    model_critical_fallback: str = "gemini-2.5-pro"
 
     # Database
     database_url: str = "postgresql://warden:password@localhost:5432/warden_db"
@@ -26,5 +30,9 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# NPCs that require the critical (pro) model due to narrative complexity
-CRITICAL_NPC_IDS = {"NPC-011", "NPC-012", "NPC-013", "NPC-S03"}
+# NPCs that require the critical (pro) model due to narrative complexity.
+# npc_009 = Clement (Council operative)
+# npc_011 = Cornelia Ashford
+# npc_012 = Marcus Wren
+# npc_s03 = The Voice
+CRITICAL_NPC_IDS = {"npc_011", "npc_012", "npc_009", "npc_s03"}

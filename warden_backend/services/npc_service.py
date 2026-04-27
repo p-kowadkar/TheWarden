@@ -1,14 +1,16 @@
 """
 npc_service.py
 
-Handles all Gemini API calls for NPC dialogue.
+Handles all Gemini API calls for NPC dialogue via Vertex AI.
 
-Responsibilities:
-  - Select the correct model (standard vs. critical) based on NPC ID.
-  - Inject the system prompt from prompt_builder.
-  - Inject conversation history from memory_service.
-  - Stream the response token-by-token back to the WebSocket caller.
-  - Persist the completed turn via memory_service.
+Model selection strategy:
+  - Primary:  gemini-3-flash-preview  (standard) / gemini-3.1-pro-preview  (critical)
+  - Fallback: gemini-2.5-flash        (standard) / gemini-2.5-pro          (critical)
+
+Retry policy:
+  - Up to 3 attempts with exponential backoff on 503 / 429 responses.
+  - If all primary-model attempts fail, one final attempt on the fallback model.
+  - The model actually used is logged at INFO level for every call.
 """
 
 from __future__ import annotations
@@ -16,9 +18,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from typing import Any
 
 import vertexai
+from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
 from vertexai.generative_models import (
     Content,
     GenerationConfig,
@@ -37,32 +39,107 @@ from services.prompt_builder import build_system_prompt
 
 logger = logging.getLogger(__name__)
 
-# Initialise Vertex AI once at module import time.
-# On Cloud Run, Application Default Credentials are used automatically.
 vertexai.init(project=settings.gcp_project_id, location=settings.gcp_location)
 
+# Retryable HTTP status codes from the Vertex AI SDK
+_RETRYABLE_EXCEPTIONS = (ServiceUnavailable, ResourceExhausted)
 
-def _select_model(npc_id: str) -> str:
-    """Return the appropriate Gemini model name for the given NPC."""
-    return (
-        settings.model_critical
-        if npc_id in CRITICAL_NPC_IDS
-        else settings.model_standard
-    )
+# Exponential backoff delays in seconds for attempts 1, 2, 3
+_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
+
+# Maximum retry attempts before switching to the fallback model
+_MAX_RETRIES = 3
 
 
-def _build_history(
-    raw_history: list[dict[str, str]],
-) -> list[Content]:
-    """
-    Convert the flat role/content list from memory_service into the
-    Vertex AI Content format expected by GenerativeModel.start_chat().
-    """
+def _model_pair(npc_id: str) -> tuple[str, str]:
+    """Return (primary_model, fallback_model) for the given NPC."""
+    if npc_id in CRITICAL_NPC_IDS:
+        return settings.model_critical, settings.model_critical_fallback
+    return settings.model_standard, settings.model_standard_fallback
+
+
+def _build_history(raw_history: list[dict[str, str]]) -> list[Content]:
+    """Convert memory_service history to Vertex AI Content format."""
     history: list[Content] = []
     for turn in raw_history:
         vertex_role = "user" if turn["role"] == "player" else "model"
-        history.append(Content(role=vertex_role, parts=[Part.from_text(turn["content"])]))
+        history.append(
+            Content(role=vertex_role, parts=[Part.from_text(turn["content"])])
+        )
     return history
+
+
+def _make_model(model_name: str, system_prompt: str) -> GenerativeModel:
+    return GenerativeModel(
+        model_name=model_name,
+        system_instruction=system_prompt,
+        generation_config=GenerationConfig(
+            max_output_tokens=settings.max_response_tokens,
+            temperature=0.85,
+            top_p=0.95,
+        ),
+    )
+
+
+async def _call_with_retry(
+    model_name: str,
+    system_prompt: str,
+    history: list[Content],
+    player_message: str,
+) -> list[str]:
+    """
+    Attempt to call the Gemini API up to _MAX_RETRIES times with exponential
+    backoff on retryable errors. Returns a list of response text chunks.
+    Raises the last exception if all attempts fail.
+    """
+    last_exc: Exception | None = None
+
+    for attempt in range(_MAX_RETRIES):
+        try:
+            model = _make_model(model_name, system_prompt)
+            chat = model.start_chat(history=history)
+
+            chunks: list[str] = []
+            loop = asyncio.get_event_loop()
+            responses = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: list(chat.send_message(player_message, stream=True)),
+                ),
+                timeout=settings.response_timeout_seconds,
+            )
+            for chunk in responses:
+                if chunk.text:
+                    chunks.append(chunk.text)
+
+            logger.info("Model used: %s (attempt %d)", model_name, attempt + 1)
+            return chunks
+
+        except _RETRYABLE_EXCEPTIONS as exc:
+            last_exc = exc
+            wait = _BACKOFF_SECONDS[min(attempt, len(_BACKOFF_SECONDS) - 1)]
+            logger.warning(
+                "Retryable error on model %s attempt %d/%d: %s — retrying in %.1fs",
+                model_name,
+                attempt + 1,
+                _MAX_RETRIES,
+                exc,
+                wait,
+            )
+            await asyncio.sleep(wait)
+
+        except asyncio.TimeoutError as exc:
+            last_exc = exc
+            logger.warning(
+                "Timeout on model %s attempt %d/%d",
+                model_name,
+                attempt + 1,
+                _MAX_RETRIES,
+            )
+            # Do not retry on timeout — fall through to fallback immediately
+            break
+
+    raise last_exc or RuntimeError(f"All {_MAX_RETRIES} attempts failed for {model_name}")
 
 
 async def generate_npc_response(
@@ -74,25 +151,14 @@ async def generate_npc_response(
     game_time: float,
 ) -> AsyncIterator[str]:
     """
-    Generate a streaming NPC response.
+    Generate a streaming NPC response with automatic model fallback.
 
-    Yields string chunks as they arrive from the Gemini API.
-    Persists the completed turn to the database after streaming finishes.
-
-    Args:
-        save_slot:      Save slot identifier.
-        npc_id:         Canonical NPC identifier (e.g. "NPC-001").
-        player_message: The player's raw text input.
-        sanity:         Current player sanity (0.0–1.0).
-        game_day:       Current in-game day.
-        game_time:      Current in-game time (0.0–24.0).
-
-    Yields:
-        String chunks of the NPC's response.
+    Yields string chunks as they arrive. Persists the completed turn to the
+    database after streaming finishes.
     """
-    # ── 1. Fetch context from database ───────────────────────────────────────
-    world_state: dict[str, Any] = await get_world_state(save_slot)
-    relationship: int = await update_relationship(save_slot, npc_id, game_day)
+    # ── 1. Fetch context ──────────────────────────────────────────────────────
+    world_state = await get_world_state(save_slot)
+    relationship = await update_relationship(save_slot, npc_id, game_day)
     history = await get_conversation_history(save_slot, npc_id)
     collected_evidence: list[str] = world_state.get("collected_evidence") or []
 
@@ -105,49 +171,49 @@ async def generate_npc_response(
         collected_evidence=collected_evidence,
     )
 
-    # ── 3. Initialise model and chat session ──────────────────────────────────
-    model_name = _select_model(npc_id)
-    model = GenerativeModel(
-        model_name=model_name,
-        system_instruction=system_prompt,
-        generation_config=GenerationConfig(
-            max_output_tokens=settings.max_response_tokens,
-            temperature=0.85,
-            top_p=0.95,
-        ),
-    )
-    chat = model.start_chat(history=_build_history(history))
+    vertex_history = _build_history(history)
+    primary_model, fallback_model = _model_pair(npc_id)
 
-    # ── 4. Stream response ────────────────────────────────────────────────────
-    full_response_parts: list[str] = []
+    # ── 3. Call primary model with retry, then fallback ───────────────────────
+    chunks: list[str] = []
+    model_used = primary_model
 
     try:
-        responses = await asyncio.wait_for(
-            asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: list(chat.send_message(player_message, stream=True)),
-            ),
-            timeout=settings.response_timeout_seconds,
+        chunks = await _call_with_retry(
+            primary_model, system_prompt, vertex_history, player_message
         )
-        for chunk in responses:
-            text = chunk.text
-            if text:
-                full_response_parts.append(text)
-                yield text
-    except asyncio.TimeoutError:
-        logger.warning("Gemini response timed out for NPC %s", npc_id)
-        fallback = "..."
-        full_response_parts.append(fallback)
-        yield fallback
-    except Exception:
-        logger.exception("Gemini API error for NPC %s", npc_id)
-        fallback = "..."
-        full_response_parts.append(fallback)
-        yield fallback
+    except Exception as primary_exc:
+        logger.error(
+            "Primary model %s failed for NPC %s after %d attempts: %s — trying fallback %s",
+            primary_model,
+            npc_id,
+            _MAX_RETRIES,
+            primary_exc,
+            fallback_model,
+        )
+        try:
+            chunks = await _call_with_retry(
+                fallback_model, system_prompt, vertex_history, player_message
+            )
+            model_used = fallback_model
+            logger.info("Fallback model %s succeeded for NPC %s", fallback_model, npc_id)
+        except Exception as fallback_exc:
+            logger.error(
+                "Fallback model %s also failed for NPC %s: %s",
+                fallback_model,
+                npc_id,
+                fallback_exc,
+            )
+            chunks = ["..."]
+            model_used = "none"
 
-    # ── 5. Persist completed turn ─────────────────────────────────────────────
-    full_response = "".join(full_response_parts)
-    if full_response:
+    # ── 4. Yield chunks ───────────────────────────────────────────────────────
+    for chunk in chunks:
+        yield chunk
+
+    # ── 5. Persist turn ───────────────────────────────────────────────────────
+    full_response = "".join(chunks)
+    if full_response and model_used != "none":
         await append_turn(
             save_slot=save_slot,
             npc_id=npc_id,
