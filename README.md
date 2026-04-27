@@ -64,7 +64,10 @@
 
 ## Plugin Installation Order
 1. **UnrealGenAISupport** (runtime AI integration)
-2. **CLAUDIUS** (editor automation, no runtime presence)
+2. **UnrealClaude** (editor automation via Claude Code CLI, MIT license — [Natfii/UnrealClaude](https://github.com/Natfii/UnrealClaude))
+
+### UnrealClaude Installation Notes
+This plugin must be built from source. Clone with submodules, build via `RunUAT BuildPlugin`, copy the output to `Plugins/UnrealClaude/`, then install MCP bridge dependencies (`npm install` in `Resources/mcp-bridge`). Requires Claude Code CLI (`npm install -g @anthropic-ai/claude-code`) and authentication via `claude auth login`. No separate API key is needed — uses your existing Claude Code session.
 
 ---
 
