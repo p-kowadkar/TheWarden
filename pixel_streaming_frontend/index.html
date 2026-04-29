@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>The Warden</title>
+
+  <!-- Cinzel: gothic serif for all headings and status text -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="css/warden.css">
+</head>
+<body>
+
+  <!--
+    Loading / connecting screen.
+    Visible on initial load and on reconnect.
+    Fades to black when the stream is ready.
+  -->
+  <div id="loading-screen" class="screen active" aria-live="polite" aria-label="Connecting to The Warden">
+    <div class="loading-inner">
+      <img
+        src="assets/loading/loading.svg"
+        alt=""
+        class="loading-candle"
+        aria-hidden="true"
+      >
+      <h1 class="title">The Warden</h1>
+      <p id="status-text" class="status-text">Establishing connection&hellip;</p>
+    </div>
+  </div>
+
+  <!--
+    Error screen.
+    Shown after 5 failed retries.
+    Hidden by default.
+  -->
+  <div id="error-screen" class="screen" aria-live="assertive" aria-label="Connection error">
+    <div class="loading-inner">
+      <h1 class="title">The Warden</h1>
+      <p id="error-text" class="status-text error-text">
+        Unable to connect. The estate is unreachable.
+      </p>
+    </div>
+  </div>
+
+  <!--
+    Stream container.
+    Hidden until the WebRTC stream is active.
+    The video element fills the full viewport.
+  -->
+  <div id="stream-container" class="stream-container hidden" aria-label="Game stream">
+    <video
+      id="stream-video"
+      autoplay
+      playsinline
+      muted
+      aria-label="The Warden game stream"
+    ></video>
+
+    <!--
+      Minimal overlay — visible only when Escape is pressed.
+      Three elements: status dot, latency, disconnect.
+    -->
+    <div id="overlay" class="overlay hidden" role="status" aria-label="Stream controls">
+      <div class="overlay-top-right">
+        <span id="latency-display" class="latency-text" aria-label="Latency">-- ms</span>
+        <span id="status-dot" class="status-dot status-connected" title="Connected" aria-label="Connection status"></span>
+      </div>
+      <div class="overlay-bottom-center">
+        <button id="disconnect-btn" class="disconnect-btn" type="button">
+          Disconnect
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!--
+    Runtime config — injected by startup.sh at deploy time.
+    If not present, connection.js falls back to window.location.hostname:443.
+    Example injection in startup.sh:
+      sed -i "s|__SIGNALING_HOST__|${PUBLIC_IP}|g" index.html
+  -->
+  <script>
+    window.WARDEN_CONFIG = {
+      signalingHost: "__SIGNALING_HOST__"
+    };
+  </script>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
