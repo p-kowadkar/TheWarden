@@ -17,7 +17,8 @@ resource "google_compute_instance_template" "pixel_streaming" {
   region       = var.region
 
   disk {
-    source_image = "projects/windows-cloud/global/images/family/windows-2022"
+    # Debian 11 with NVIDIA CUDA 12.1 pre-installed (Deep Learning VM image)
+    source_image = "projects/ml-images/global/images/family/common-cu121-debian-11"
     auto_delete  = true
     boot         = true
     disk_size_gb = 100
@@ -41,7 +42,7 @@ resource "google_compute_instance_template" "pixel_streaming" {
   }
 
   metadata = {
-    windows-startup-script-ps1 = file("${path.module}/../scripts/startup.sh")
+    startup-script = file("${path.module}/../scripts/startup.sh")
   }
 
   tags = ["pixel-streaming", "warden-gpu"]

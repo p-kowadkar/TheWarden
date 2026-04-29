@@ -117,17 +117,14 @@ async def record_evidence(payload: EvidencePayload) -> JSONResponse:
         payload.game_day,
         payload.game_time,
     )
-    # Append to world_state collected_evidence array
+    # Append to world_state collected_evidence array (no-op if already present)
     await pool.execute(
         """
         UPDATE world_state
-        SET collected_evidence = array_append(
-                CASE WHEN $2 = ANY(collected_evidence) THEN collected_evidence
-                     ELSE collected_evidence END,
-                CASE WHEN $2 = ANY(collected_evidence) THEN NULL ELSE $2 END
-            ),
+        SET collected_evidence = array_append(collected_evidence, $2),
             updated_at = NOW()
         WHERE save_slot = $1
+        AND NOT ($2 = ANY(collected_evidence))
         """,
         payload.save_slot,
         payload.evidence_id,
